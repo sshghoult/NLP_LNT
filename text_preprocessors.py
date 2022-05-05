@@ -2,6 +2,10 @@ from spacy.lang.ru import Russian
 import spacy
 import pymorphy2
 import string
+import os
+import abc
+import typing
+import entities as stats
 
 import nltk
 
@@ -35,7 +39,7 @@ class BaseLazyTextPreprocessor(object):
         for token in doc:
             dump_flag = False
             for forbidden in check_against:
-                if token.lemma_ in forbidden:
+                if any(k in forbidden for k in token.lemma_):
                     dump_flag = True
                     break
             if not dump_flag:
@@ -56,6 +60,7 @@ class CollocationLazyTextProcessor(BaseLazyTextPreprocessor):
                 raise StopIteration
             self.__load_buffer()
         next_ = self.clean_buffer.pop()
+        return next_
 
 
     def __iter__(self):
@@ -80,9 +85,72 @@ class CollocationLazyTextProcessor(BaseLazyTextPreprocessor):
                 self.clean_buffer.appendleft(cleaned)
 
 
+class SourceAggregatorContinuous(object):
+    """Объект с интерфейсом TextIO, незаметно для следующих звеньев объединяющий несколько
+    непрерывных потоков данных в один последовательно"""
+    def __init__(self, sources: List[os.PathLike]):
+        self.src = sources
+        self.cur = None
+
+
+
+class AbstractStatisticsContainer(abc.ABC):
+    @abc.abstractmethod
+    def get(self, key):
+        pass
+
+    @abc.abstractmethod
+    def set(self, key, data):
+        pass
+
+    @abc.abstractmethod
+    def add(self, key, data):
+        pass
+
+
+
+class CollocationStatisticsConsumer(object):
+    def __init__(self, window_size, container: stats.AbstractCollector):
+        self.window_border = window_size // 2
+        self.container = container
+    # first, let's try to collect only adjacent pairs
+
+    def process(self, generators: typing.List[typing.Iterable]):
+        for flow in generators:
+            # theoretically, each flow and each chunk might be processed in parallel, summarizing
+            # the counters afterwards
+            for chunk in flow:
+
+                parsed_words = [stats.WordToken(wi) for wi in chunk]
+
+                for w in range(len(chunk) - 1):
+                    self.register_pair(parsed_words[w], parsed_words[w+1])
+
+
+
+    def register_pair(self, a, b):
+        ngram = stats.NGRam((a, b))
+
+        for wi in ngram:
+            self.container.add(wi, ngram)
+
+        self.container.add(ngram.pos_mask, ngram)
+
+
+# source = 'prestuplenie-i-nakazanie.txt'
+# source = 'notebooks/tmp.txt'
+# source = 'pinshort.txt'
+source = ''
+
+
+coll = stats.InMemoryCollector()
+consumer = CollocationStatisticsConsumer(0, coll)
+
+
 nlp = spacy.load('ru_core_news_sm')
 
-with open('notebooks/tmp.txt', 'r', encoding='utf-8') as fp:
+with open(source, 'r', encoding='utf-8') as fp:
     LTP = CollocationLazyTextProcessor(fp, nlp, stopwords.words("russian"))
-    for k in LTP:
-        print(k)
+    consumer.process([LTP])
+
+print(*coll.dict.items(), sep='\n\n')
