@@ -5,7 +5,9 @@ import string
 import os
 import abc
 import typing
-import entities as stats
+import entities
+import numpy as np
+import scipy
 
 import nltk
 
@@ -62,7 +64,6 @@ class CollocationLazyTextProcessor(BaseLazyTextPreprocessor):
         next_ = self.clean_buffer.pop()
         return next_
 
-
     def __iter__(self):
         return self
 
@@ -88,32 +89,16 @@ class CollocationLazyTextProcessor(BaseLazyTextPreprocessor):
 class SourceAggregatorContinuous(object):
     """Объект с интерфейсом TextIO, незаметно для следующих звеньев объединяющий несколько
     непрерывных потоков данных в один последовательно"""
+
     def __init__(self, sources: List[os.PathLike]):
         self.src = sources
         self.cur = None
 
 
-
-class AbstractStatisticsContainer(abc.ABC):
-    @abc.abstractmethod
-    def get(self, key):
-        pass
-
-    @abc.abstractmethod
-    def set(self, key, data):
-        pass
-
-    @abc.abstractmethod
-    def add(self, key, data):
-        pass
-
-
-
-class CollocationStatisticsConsumer(object):
-    def __init__(self, window_size, container: stats.AbstractCollector):
+class CollocationStatisticsConsumerDB(object):
+    def __init__(self, window_size, container: entities.AbstractDBCollector):
         self.window_border = window_size // 2
         self.container = container
-    # first, let's try to collect only adjacent pairs
 
     def process(self, generators: typing.List[typing.Iterable]):
         for flow in generators:
@@ -121,36 +106,68 @@ class CollocationStatisticsConsumer(object):
             # the counters afterwards
             for chunk in flow:
 
-                parsed_words = [stats.WordToken(wi) for wi in chunk]
+                parsed_words = [entities.WordToken(wi) for wi in chunk]
 
                 for w in range(len(chunk) - 1):
-                    self.register_pair(parsed_words[w], parsed_words[w+1])
-
-
+                    self.register_pair(parsed_words[w], parsed_words[w + 1])
 
     def register_pair(self, a, b):
-        ngram = stats.NGRam((a, b))
+        ngram = entities.Ngram((a, b))
 
-        for wi in ngram:
-            self.container.add(wi, ngram)
+        self.container.add_ngram(ngram)
 
-        self.container.add(ngram.pos_mask, ngram)
+    def ngram_chi_square(self, ngram: entities.Ngram[entities.WordToken, entities.WordToken]) -> \
+            typing.Tuple[float, float]:
+
+        observed = np.empty([2, 2])
+        expected = np.empty([2, 2])
+
+        # TODO: can be optimized, parts of equations are reoccurring
+
+        observed[0][0] = self.container.observed_count(ngram, [True, True])
+        expected[0][0] = self.container.observed_count(ngram, [True, None]) * self.container.observed_count(ngram, [None, True]) / \
+                         self.container.ngrams_count()
+
+        observed[0][1] = self.container.observed_count(ngram, [False, True])
+        expected[0][1] = self.container.observed_count(ngram, [False, None]) * self.container.observed_count(ngram, [None, True]) / \
+                         self.container.ngrams_count()
+
+
+        observed[1][0] = self.container.observed_count(ngram, [True, False])
+        expected[1][0] = self.container.observed_count(ngram, [True, None]) * self.container.observed_count(ngram, [None, False]) / \
+                         self.container.ngrams_count()
+
+        observed[1][1] = self.container.observed_count(ngram, [False, False])
+        expected[1][1] = self.container.observed_count(ngram, [False, None]) * self.container.observed_count(ngram, [None, False]) / \
+                         self.container.ngrams_count()
+
+        return scipy.stats.chisquare(observed.flatten(), expected.flatten())
+
+    def compute_statistics(self):
+        chi_square = {}
+        ngrams_generator = self.container.all_ngrams()
+
+        for i in ngrams_generator:
+            chi_square[i] = self.ngram_chi_square(i)
+
+        return chi_square
 
 
 # source = 'prestuplenie-i-nakazanie.txt'
-# source = 'notebooks/tmp.txt'
+source = 'notebooks/tmp.txt'
 # source = 'pinshort.txt'
-source = ''
+# source = ''
 
-
-coll = stats.InMemoryCollector()
-consumer = CollocationStatisticsConsumer(0, coll)
-
-
-nlp = spacy.load('ru_core_news_sm')
-
-with open(source, 'r', encoding='utf-8') as fp:
-    LTP = CollocationLazyTextProcessor(fp, nlp, stopwords.words("russian"))
-    consumer.process([LTP])
-
-print(*coll.dict.items(), sep='\n\n')
+#
+# coll = entities.InMemoryCategorizedCollector()
+# consumer = CollocationStatisticsConsumer(0, coll)
+#
+# nlp = spacy.load('ru_core_news_sm')
+#
+# with open(source, 'r', encoding='utf-8') as fp:
+#     LTP = CollocationLazyTextProcessor(fp, nlp, stopwords.words("russian"))
+#     consumer.process([LTP])
+#     consumer.compute_statistics()
+#
+# print(*coll.dict.items(), sep='\n\n', end='\n\n\n\n')
+# print(*consumer.statistics.items(), sep='\n\n')
