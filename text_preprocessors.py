@@ -8,6 +8,7 @@ import typing
 import entities
 import numpy as np
 import scipy
+import DBCollector
 
 import nltk
 
@@ -96,11 +97,12 @@ class SourceAggregatorContinuous(object):
 
 
 class CollocationStatisticsConsumerDB(object):
-    def __init__(self, window_size, container: entities.AbstractDBCollector):
-        self.window_border = window_size // 2
-        self.container = container
+    def __init__(self):
+        # self.window_border = window_size // 2
+        self.container = DBCollector.DBCollector()
 
     def process(self, generators: typing.List[typing.Iterable]):
+        counter = 0
         for flow in generators:
             # theoretically, each flow and each chunk might be processed in parallel, summarizing
             # the counters afterwards
@@ -110,13 +112,15 @@ class CollocationStatisticsConsumerDB(object):
 
                 for w in range(len(chunk) - 1):
                     self.register_pair(parsed_words[w], parsed_words[w + 1])
+                    counter += 1
+                    print(f"{counter} bigrams processed")
 
     def register_pair(self, a, b):
         ngram = entities.Ngram((a, b))
 
         self.container.add_ngram(ngram)
 
-    def ngram_chi_square(self, ngram: entities.Ngram[entities.WordToken, entities.WordToken]) -> \
+    def ngram_chi_square(self, ngram: entities.Ngram) -> \
             typing.Tuple[float, float]:
 
         observed = np.empty([2, 2])
@@ -141,33 +145,42 @@ class CollocationStatisticsConsumerDB(object):
         expected[1][1] = self.container.observed_count(ngram, [False, None]) * self.container.observed_count(ngram, [None, False]) / \
                          self.container.ngrams_count()
 
+        # print(observed)
+        # print(expected)
+
+        observed /= sum(observed)
+        expected /= sum(expected)
+
         return scipy.stats.chisquare(observed.flatten(), expected.flatten())
 
     def compute_statistics(self):
         chi_square = {}
         ngrams_generator = self.container.all_ngrams()
 
-        for i in ngrams_generator:
+        for counter, i in enumerate(ngrams_generator):
             chi_square[i] = self.ngram_chi_square(i)
-
+            print(f"{counter} statistics calculated")
         return chi_square
 
 
 # source = 'prestuplenie-i-nakazanie.txt'
-source = 'notebooks/tmp.txt'
-# source = 'pinshort.txt'
+# source = 'notebooks/tmp.txt'
+source = 'pinshort.txt'
 # source = ''
 
-#
-# coll = entities.InMemoryCategorizedCollector()
-# consumer = CollocationStatisticsConsumer(0, coll)
-#
-# nlp = spacy.load('ru_core_news_sm')
-#
-# with open(source, 'r', encoding='utf-8') as fp:
-#     LTP = CollocationLazyTextProcessor(fp, nlp, stopwords.words("russian"))
-#     consumer.process([LTP])
-#     consumer.compute_statistics()
-#
-# print(*coll.dict.items(), sep='\n\n', end='\n\n\n\n')
-# print(*consumer.statistics.items(), sep='\n\n')
+
+consumer = CollocationStatisticsConsumerDB()
+
+nlp = spacy.load('ru_core_news_sm')
+
+with open(source, 'r', encoding='utf-8') as fp:
+    LTP = CollocationLazyTextProcessor(fp, nlp, stopwords.words("russian"))
+    consumer.process([LTP])
+
+chi_stat = consumer.compute_statistics()
+
+result = sorted(chi_stat.items(), key=lambda x: x[1][0], reverse=True)
+
+# TODO: might be useful to dump it into DB and sorted it in that process
+
+print(*result[10], sep='\n')
