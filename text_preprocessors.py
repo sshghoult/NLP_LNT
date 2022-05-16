@@ -9,8 +9,9 @@ import entities
 import numpy as np
 import scipy
 import DBCollector
-
+import math
 import nltk
+import multiprocessing
 
 # nltk.download("stopwords")
 from nltk.corpus import stopwords
@@ -96,6 +97,9 @@ class SourceAggregatorContinuous(object):
         self.cur = None
 
 
+
+
+
 class CollocationStatisticsConsumerDB(object):
     def __init__(self):
         # self.window_border = window_size // 2
@@ -126,24 +130,28 @@ class CollocationStatisticsConsumerDB(object):
         observed = np.empty([2, 2])
         expected = np.empty([2, 2])
 
-        # TODO: can be optimized, parts of equations are reoccurring
-
         observed[0][0] = self.container.observed_count(ngram, [True, True])
-        expected[0][0] = self.container.observed_count(ngram, [True, None]) * self.container.observed_count(ngram, [None, True]) / \
-                         self.container.ngrams_count()
-
         observed[0][1] = self.container.observed_count(ngram, [False, True])
-        expected[0][1] = self.container.observed_count(ngram, [False, None]) * self.container.observed_count(ngram, [None, True]) / \
-                         self.container.ngrams_count()
-
-
         observed[1][0] = self.container.observed_count(ngram, [True, False])
-        expected[1][0] = self.container.observed_count(ngram, [True, None]) * self.container.observed_count(ngram, [None, False]) / \
-                         self.container.ngrams_count()
-
         observed[1][1] = self.container.observed_count(ngram, [False, False])
-        expected[1][1] = self.container.observed_count(ngram, [False, None]) * self.container.observed_count(ngram, [None, False]) / \
-                         self.container.ngrams_count()
+
+        total_ngrams = self.container.ngrams_count()
+
+        obs_w1_true = self.container.observed_count(ngram, [True, None])
+
+        obs_w1_false = self.container.observed_count(ngram, [False, None])
+
+        obs_w2_true = self.container.observed_count(ngram, [None, True])
+
+        obs_w2_false = self.container.observed_count(ngram, [None, False])
+
+        expected[0][0] = obs_w1_true * obs_w2_true / total_ngrams
+
+        expected[0][1] = obs_w1_false * obs_w2_true / total_ngrams
+
+        expected[1][0] = obs_w1_true * obs_w2_false / total_ngrams
+
+        expected[1][1] = obs_w1_false * obs_w2_false / total_ngrams
 
         # print(observed)
         # print(expected)
@@ -153,34 +161,46 @@ class CollocationStatisticsConsumerDB(object):
 
         return scipy.stats.chisquare(observed.flatten(), expected.flatten())
 
-    def compute_statistics(self):
-        chi_square = {}
-        ngrams_generator = self.container.all_ngrams()
+    def compute_statistics(self, n_processes: int):
+        def compute_stats_for_partition(k):
+            ngrams_generator = self.container.all_ngrams(offset=partition_size * k, limit=partition_size)
+            counter = 0
+            for i in ngrams_generator:
+                print(i)
+                stats = self.ngram_chi_square(i)
+                self.container.update_ngram(i, stats)
 
-        for counter, i in enumerate(ngrams_generator):
-            chi_square[i] = self.ngram_chi_square(i)
-            print(f"{counter} statistics calculated")
-        return chi_square
+                counter += 1
+                # print(f"{counter} statistics calculated")
+            print('\n\n')
+
+        partition_size = math.ceil(self.container.counter / n_processes)
+
+        for k in range(n_processes):
+            # multiprocessing.Process(target=compute_stats_for_partition, args=(k, )).start()
+            compute_stats_for_partition(k)
+
+    def get_statistics(self):
+        return self.container.get_statistics()
 
 
-# source = 'prestuplenie-i-nakazanie.txt'
-# source = 'notebooks/tmp.txt'
-source = 'pinshort.txt'
-# source = ''
+
+if __name__ == '__main__':
+    # source = 'prestuplenie-i-nakazanie.txt'
+    source = 'notebooks/tmp.txt'
+    # source = 'pinshort.txt'
+    # source = ''
 
 
-consumer = CollocationStatisticsConsumerDB()
+    consumer = CollocationStatisticsConsumerDB()
 
-nlp = spacy.load('ru_core_news_sm')
+    nlp = spacy.load('ru_core_news_sm')
 
-with open(source, 'r', encoding='utf-8') as fp:
-    LTP = CollocationLazyTextProcessor(fp, nlp, stopwords.words("russian"))
-    consumer.process([LTP])
+    with open(source, 'r', encoding='utf-8') as fp:
+        LTP = CollocationLazyTextProcessor(fp, nlp, stopwords.words("russian"))
+        consumer.process([LTP])
 
-chi_stat = consumer.compute_statistics()
+    consumer.compute_statistics(n_processes=3)
+    chi_stat = list(consumer.get_statistics())
 
-result = sorted(chi_stat.items(), key=lambda x: x[1][0], reverse=True)
-
-# TODO: might be useful to dump it into DB and sorted it in that process
-
-print(*result[10], sep='\n')
+    # print(*chi_stat[:10], sep='\n')
